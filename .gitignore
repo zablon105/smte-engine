@@ -1,0 +1,6 @@
+smte-env/
+.env
+__pycache__/
+logs/
+data/backups/
+*.pyc
