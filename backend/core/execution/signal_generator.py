@@ -1,26 +1,19 @@
 """
 signal_generator.py
-Converts high-scoring CRT setups into actual trade signals with
+Converts high-scoring, CONFIRMED CRT setups into trade signals with
 entry, stop-loss, and take-profit levels.
 
-Beginner note on the price logic:
-  ENTRY: the manipulation candle's close - this is the point where
-  price already reclaimed the range, confirming the sweep. Entering
-  here (rather than trying to catch the exact wick) is more
-  realistic and safer.
-
-  STOP-LOSS: placed just beyond the manipulation wick's extreme
-  (the actual low/high of the sweep), plus a small buffer. If price
-  revisits that extreme, the premise of the setup (that liquidity
-  was swept and won't be revisited) is invalidated.
-
-  TAKE-PROFIT: calculated using a fixed risk-reward ratio off the
-  stop distance. This is a placeholder target until a proper
-  "next liquidity zone" or "next FVG" detector exists to set a
-  more precise, structure-based target.
+IMPORTANT FIX: entry price is now based on the candle that actually
+CONFIRMED distribution (closed beyond the opposite range boundary) -
+not the original range_low/range_high. Using the original range
+level as "entry" was unrealistic: by the time a setup is confirmed,
+price has already moved well past that level, so it isn't a price
+a trader could actually still enter at. Using the confirmation
+candle's close reflects the earliest realistic point a trader could
+have acted on the now-confirmed setup.
 """
 
-from app.models.models import CrtSetup, SetupScore, TradeSignal
+from app.models.models import Candle, CrtSetup, SetupScore, TradeSignal
 
 
 def _true_pip_size(digits: int, point: float) -> float:
@@ -31,6 +24,36 @@ def _true_pip_size(digits: int, point: float) -> float:
 
 def _signal_already_exists(db, crt_setup_id: int) -> bool:
     return db.query(TradeSignal).filter_by(crt_setup_id=crt_setup_id).first() is not None
+
+
+def _find_confirmation_candle(db, setup: CrtSetup, timeframe: str = "M15", limit: int = 1000):
+    """
+    Finds the actual candle that confirmed distribution (closed
+    beyond the opposite range boundary). Returns the Candle object,
+    or None if not found within the available forward data.
+    """
+    candles = (
+        db.query(Candle)
+        .filter(
+            Candle.instrument_id == setup.instrument_id,
+            Candle.timeframe == timeframe,
+            Candle.open_time > setup.detected_at,
+        )
+        .order_by(Candle.open_time.asc())
+        .limit(limit)
+        .all()
+    )
+
+    range_high = float(setup.range_high)
+    range_low = float(setup.range_low)
+
+    for candle in candles:
+        close = float(candle.close)
+        if setup.setup_direction == "BULLISH" and close > range_high:
+            return candle
+        elif setup.setup_direction == "BEARISH" and close < range_low:
+            return candle
+    return None
 
 
 def generate_signals(
@@ -47,11 +70,11 @@ def generate_signals(
     and generates a TradeSignal for each one that doesn't already
     have one.
 
-    Only CONFIRMED (phase = 'DISTRIBUTION') setups are eligible -
-    a MANIPULATION-only setup hasn't shown real follow-through yet,
-    regardless of its confluence score, so it's not safe to trade.
-
-    Returns the number of new TradeSignal rows created.
+    Entry is the CONFIRMATION candle's close (the realistic point a
+    trader could act, now that distribution is confirmed) - not the
+    original range level. Stop-loss is still anchored to the
+    manipulation wick's extreme (the invalidation point). Take-profit
+    is a fixed risk-reward multiple of that stop distance from entry.
     """
     true_pip = _true_pip_size(digits, point)
     stop_buffer = stop_buffer_pips * true_pip
@@ -74,25 +97,26 @@ def generate_signals(
         if _signal_already_exists(db, setup.id):
             continue
 
+        confirmation_candle = _find_confirmation_candle(db, setup)
+        if confirmation_candle is None:
+            continue  # shouldn't happen since phase=DISTRIBUTION implies this exists, but guard anyway
+
         manipulation_price = float(setup.manipulation_price)
-        range_high = float(setup.range_high)
-        range_low = float(setup.range_low)
+        entry_price = float(confirmation_candle.close)
 
         if setup.setup_direction == "BULLISH":
             direction = "BUY"
-            entry_price = range_low  # approximate reclaim level; refined below
             stop_loss = manipulation_price - stop_buffer
             risk_distance = entry_price - stop_loss
             take_profit = entry_price + (risk_distance * risk_reward_ratio)
-        else:  # BEARISH
+        else:
             direction = "SELL"
-            entry_price = range_high
             stop_loss = manipulation_price + stop_buffer
             risk_distance = stop_loss - entry_price
             take_profit = entry_price - (risk_distance * risk_reward_ratio)
 
         if risk_distance <= 0:
-            continue  # safety check: invalid setup geometry, skip rather than create a broken signal
+            continue  # invalid geometry (e.g. entry already beyond stop), skip
 
         signal = TradeSignal(
             instrument_id=instrument_id,
