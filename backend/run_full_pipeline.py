@@ -21,7 +21,7 @@ from core.order_blocks.detector import detect_order_blocks, mark_mitigated_block
 from core.liquidity.detector import detect_liquidity_zones, mark_swept_zones
 from core.crt.detector import detect_crt_setups_mtf
 from core.market_analysis.fvg_detector import detect_and_store_fvgs
-from core.scoring.confluence import score_crt_setups_v3
+from core.scoring.confluence import score_crt_setups_v4
 from core.execution.signal_generator import generate_signals
 from strategy_backtest.signal_backtest import backtest_all_signals
 
@@ -94,7 +94,7 @@ def run_for_symbol(symbol: str, min_gap_pips: float = 1.0):
 
         # --- Step 6: Confluence scoring ---
         print(f"[{symbol}] Scoring setups...")
-        scored = score_crt_setups_v3(
+        scored = score_crt_setups_v4(
             db, instrument.id, 15.0, 10.0, digits, point
         )
         print(f"[{symbol}]   scored: {scored} setups")
