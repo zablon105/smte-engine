@@ -16,7 +16,18 @@ Beginner note on the matching logic:
   and its price level is close to the manipulation price.
 """
 
-from app.models.models import CrtSetup, LiquidityZone, OrderBlock, SetupScore
+from sqlalchemy import or_
+
+from app.models.models import (
+    CrtSetup,
+    FairValueGap,
+    LiquidityZone,
+    OrderBlock,
+    SetupScore,
+)
+
+
+FVG_MATCH_SCORE = 5
 
 
 def _matching_zone_type(setup_direction: str) -> str:
@@ -103,6 +114,36 @@ def _find_matching_order_block(db, instrument_id: int, setup, tolerance: float):
     # precise zone is a stronger signal than a wide, loose one.
     matches.sort(key=lambda b: float(b.high_price) - float(b.low_price))
     return matches[0]
+
+
+def _find_matching_fvg(db, instrument_id: int, setup: CrtSetup, tolerance: float):
+    """
+    Find the tightest same-direction FVG around the manipulation price
+    that existed and was not yet fully filled at setup time.
+    """
+    manipulation_price = float(setup.manipulation_price)
+
+    candidates = (
+        db.query(FairValueGap)
+        .filter(
+            FairValueGap.instrument_id == instrument_id,
+            FairValueGap.gap_type == setup.setup_direction,
+            FairValueGap.formed_at < setup.detected_at,
+            or_(
+                FairValueGap.filled_at.is_(None),
+                FairValueGap.filled_at >= setup.detected_at,
+            ),
+            FairValueGap.bottom_price <= manipulation_price + tolerance,
+            FairValueGap.top_price >= manipulation_price - tolerance,
+        )
+        .all()
+    )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda gap: float(gap.top_price) - float(gap.bottom_price))
+    return candidates[0]
 
 
 def _score_already_exists(db, crt_setup_id: int) -> bool:
@@ -227,6 +268,70 @@ def score_crt_setups_v2(
                 total_score=total,
             )
             db.add(score)
+
+        processed_count += 1
+
+    db.commit()
+    return processed_count
+
+
+def score_crt_setups_v3(
+    db,
+    instrument_id: int,
+    liquidity_tolerance_pips: float = 15.0,
+    order_block_tolerance_pips: float = 10.0,
+    digits: int = 5,
+    point: float = 0.00001,
+    fvg_tolerance_pips: float = 10.0,
+) -> int:
+    """
+    Score CRT setups using liquidity, order-block, and FVG confluence.
+
+    Re-scores existing SetupScore rows. Earlier scoring functions are
+    retained unchanged so existing callers can continue using them.
+    """
+    true_pip = _true_pip_size(digits, point)
+    liquidity_tolerance = liquidity_tolerance_pips * true_pip
+    order_block_tolerance = order_block_tolerance_pips * true_pip
+    fvg_tolerance = fvg_tolerance_pips * true_pip
+
+    setups = db.query(CrtSetup).filter_by(instrument_id=instrument_id).all()
+    processed_count = 0
+
+    for setup in setups:
+        matched_zone = _find_matching_zone(db, instrument_id, setup, liquidity_tolerance)
+        liquidity_score = matched_zone.strength_score if matched_zone else 0
+
+        matched_block = _find_matching_order_block(
+            db, instrument_id, setup, order_block_tolerance
+        )
+        order_block_score = 5 if matched_block else 0
+
+        matched_fvg = _find_matching_fvg(db, instrument_id, setup, fvg_tolerance)
+        fvg_score = FVG_MATCH_SCORE if matched_fvg else 0
+
+        confirmation_bonus = 3 if setup.phase == "DISTRIBUTION" else 0
+        total = liquidity_score + order_block_score + fvg_score + confirmation_bonus
+
+        existing_score = db.query(SetupScore).filter_by(crt_setup_id=setup.id).first()
+        if existing_score:
+            existing_score.liquidity_score = liquidity_score
+            existing_score.order_block_score = order_block_score
+            existing_score.fvg_score = fvg_score
+            existing_score.total_score = total
+        else:
+            db.add(
+                SetupScore(
+                    crt_setup_id=setup.id,
+                    liquidity_score=liquidity_score,
+                    order_block_score=order_block_score,
+                    fvg_score=fvg_score,
+                    structure_score=0,
+                    smt_score=0,
+                    session_score=0,
+                    total_score=total,
+                )
+            )
 
         processed_count += 1
 

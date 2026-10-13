@@ -2,7 +2,7 @@
 run_full_pipeline.py
 Orchestrates the ENTIRE SMTE pipeline across multiple symbols in
 one run: data collection -> order blocks -> liquidity zones ->
-CRT setups -> confluence scoring -> trade signals -> backtest.
+CRT setups -> FVG detection -> confluence scoring -> trade signals -> backtest.
 
 This exists because doing all of this manually, symbol by symbol,
 command by command, is slow and error-prone. Running it once here
@@ -10,7 +10,7 @@ gives a much larger, more statistically meaningful sample to
 evaluate the system against.
 
 Usage (from SMTE/backend, with smte-env activated):
-    python run_full_pipeline.py
+    python run_full_pipeline.py --min-gap-pips 1.0
 """
 
 from app.database.base import SessionLocal
@@ -20,7 +20,8 @@ from app.services.data_collector import collect
 from core.order_blocks.detector import detect_order_blocks, mark_mitigated_blocks
 from core.liquidity.detector import detect_liquidity_zones, mark_swept_zones
 from core.crt.detector import detect_crt_setups_mtf
-from core.scoring.confluence import score_crt_setups_v2
+from core.market_analysis.fvg_detector import detect_and_store_fvgs
+from core.scoring.confluence import score_crt_setups_v3
 from core.execution.signal_generator import generate_signals
 from strategy_backtest.signal_backtest import backtest_all_signals
 
@@ -35,11 +36,11 @@ M15_COUNT = 25000   # ~ 8-9 months of M15 bars
 H1_COUNT = 6000      # ~ 1 year of H1 bars
 H4_COUNT = 1500      # ~ 1 year of H4 bars
 
-MIN_SCORE = 7
+MIN_SCORE = 15
 RISK_REWARD = 2.0
 
 
-def run_for_symbol(symbol: str):
+def run_for_symbol(symbol: str, min_gap_pips: float = 1.0):
     print(f"\n{'=' * 60}")
     print(f"Processing {symbol}")
     print(f"{'=' * 60}")
@@ -62,6 +63,7 @@ def run_for_symbol(symbol: str):
 
         digits = instrument.digits
         point = float(instrument.pip_size)
+        true_pip = point * 10 if digits in (3, 5) else point
 
         # --- Step 2: Order blocks (M15) ---
         print(f"[{symbol}] Detecting order blocks...")
@@ -81,17 +83,28 @@ def run_for_symbol(symbol: str):
         crt_created = detect_crt_setups_mtf(db, instrument.id, "H4", "M15", H4_COUNT)
         print(f"[{symbol}]   CRT setups: {crt_created} created")
 
-        # --- Step 5: Confluence scoring ---
+        # --- Step 5: FVG detection (M15 and H1 only) ---
+        print(f"[{symbol}] Detecting fair value gaps...")
+        min_gap_size = min_gap_pips * true_pip
+        for tf in ("M15", "H1"):
+            fvg_created = detect_and_store_fvgs(
+                db, instrument.id, tf, min_gap_size
+            )
+            print(f"[{symbol}]   FVG [{tf}]: {fvg_created} stored")
+
+        # --- Step 6: Confluence scoring ---
         print(f"[{symbol}] Scoring setups...")
-        scored = score_crt_setups_v2(db, instrument.id, 15.0, 10.0, digits, point)
+        scored = score_crt_setups_v3(
+            db, instrument.id, 15.0, 10.0, digits, point
+        )
         print(f"[{symbol}]   scored: {scored} setups")
 
-        # --- Step 6: Trade signal generation ---
+        # --- Step 7: Trade signal generation ---
         print(f"[{symbol}] Generating trade signals...")
         signals_created = generate_signals(db, instrument.id, MIN_SCORE, RISK_REWARD, 3.0, digits, point)
         print(f"[{symbol}]   signals created: {signals_created}")
 
-        # --- Step 7: Backtest ---
+        # --- Step 8: Backtest ---
         print(f"[{symbol}] Backtesting signals...")
         results = backtest_all_signals(db, instrument.id, "M15")
         return {"symbol": symbol, "results": results}
@@ -100,12 +113,12 @@ def run_for_symbol(symbol: str):
         db.close()
 
 
-def main():
+def main(min_gap_pips: float = 1.0):
     all_results = []
 
     for symbol in SYMBOLS:
         try:
-            result = run_for_symbol(symbol)
+            result = run_for_symbol(symbol, min_gap_pips)
             if result:
                 all_results.append(result)
         except Exception as e:
@@ -150,4 +163,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run the full SMTE analysis and backtest pipeline.")
+    parser.add_argument(
+        "--min-gap-pips",
+        type=float,
+        default=1.0,
+        help="Ignore FVGs smaller than this pip size (default: 1.0).",
+    )
+    arguments = parser.parse_args()
+    if arguments.min_gap_pips < 0:
+        parser.error("--min-gap-pips must be non-negative")
+    main(arguments.min_gap_pips)

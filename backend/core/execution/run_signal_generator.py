@@ -16,7 +16,7 @@ from core.execution.signal_generator import generate_signals
 def main():
     parser = argparse.ArgumentParser(description="Generate trade signals from confirmed, high-scoring CRT setups.")
     parser.add_argument("--symbol", required=True, help="Exact MT5 symbol name, e.g. EURUSD.m")
-    parser.add_argument("--min-score", type=int, default=10, help="Minimum total_score to qualify")
+    parser.add_argument("--min-score", type=int, default=15, help="Minimum total_score to qualify")
     parser.add_argument("--rr", type=float, default=2.0, help="Risk-reward ratio for take-profit")
     parser.add_argument("--stop-buffer-pips", type=float, default=3.0)
     args = parser.parse_args()
