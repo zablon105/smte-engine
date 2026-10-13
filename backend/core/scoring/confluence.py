@@ -28,6 +28,7 @@ from app.models.models import (
 
 
 FVG_MATCH_SCORE = 5
+FVG_MATCH_TIMEFRAMES = ("M15", "H1")
 
 
 def _matching_zone_type(setup_direction: str) -> str:
@@ -119,7 +120,8 @@ def _find_matching_order_block(db, instrument_id: int, setup, tolerance: float):
 def _find_matching_fvg(db, instrument_id: int, setup: CrtSetup, tolerance: float):
     """
     Find the tightest same-direction FVG around the manipulation price
-    that existed and was not yet fully filled at setup time.
+    that existed and was not yet fully filled at setup time. Only M15
+    and H1 gaps are considered, matching the current pipeline inputs.
     """
     manipulation_price = float(setup.manipulation_price)
 
@@ -127,6 +129,7 @@ def _find_matching_fvg(db, instrument_id: int, setup: CrtSetup, tolerance: float
         db.query(FairValueGap)
         .filter(
             FairValueGap.instrument_id == instrument_id,
+            FairValueGap.timeframe.in_(FVG_MATCH_TIMEFRAMES),
             FairValueGap.gap_type == setup.setup_direction,
             FairValueGap.formed_at < setup.detected_at,
             or_(

@@ -81,6 +81,16 @@ class ScoreCrtSetupsV3Tests(unittest.TestCase):
                     filled_at=base_time + timedelta(hours=1, minutes=30),
                     fill_percentage=100,
                 ),
+                FairValueGap(
+                    instrument_id=1,
+                    timeframe="H4",
+                    gap_type="BULLISH",
+                    bottom_price=1.0995,
+                    top_price=1.1005,
+                    formed_at=base_time - timedelta(hours=1),
+                    filled_at=None,
+                    fill_percentage=0,
+                ),
             ]
         )
         self.session.commit()
