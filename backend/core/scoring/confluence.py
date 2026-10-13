@@ -16,19 +16,28 @@ Beginner note on the matching logic:
   and its price level is close to the manipulation price.
 """
 
+from datetime import timedelta
+
 from sqlalchemy import or_
 
 from app.models.models import (
     CrtSetup,
     FairValueGap,
     LiquidityZone,
+    MarketStructure,
     OrderBlock,
+    SmtDivergence,
     SetupScore,
+    TradingSession,
 )
 
 
+CONFLUENCE_TIMEFRAMES = ("M15", "H1")
 FVG_MATCH_SCORE = 5
-FVG_MATCH_TIMEFRAMES = ("M15", "H1")
+STRUCTURE_MATCH_SCORE = 5
+SMT_MATCH_SCORE = 5
+SESSION_MATCH_SCORE = 3
+EVENT_CONFLUENCE_LOOKBACK = timedelta(hours=24)
 
 
 def _matching_zone_type(setup_direction: str) -> str:
@@ -129,7 +138,7 @@ def _find_matching_fvg(db, instrument_id: int, setup: CrtSetup, tolerance: float
         db.query(FairValueGap)
         .filter(
             FairValueGap.instrument_id == instrument_id,
-            FairValueGap.timeframe.in_(FVG_MATCH_TIMEFRAMES),
+            FairValueGap.timeframe.in_(CONFLUENCE_TIMEFRAMES),
             FairValueGap.gap_type == setup.setup_direction,
             FairValueGap.formed_at < setup.detected_at,
             or_(
@@ -332,6 +341,123 @@ def score_crt_setups_v3(
                     structure_score=0,
                     smt_score=0,
                     session_score=0,
+                    total_score=total,
+                )
+            )
+
+        processed_count += 1
+
+    db.commit()
+    return processed_count
+
+
+def score_crt_setups_v4(
+    db,
+    instrument_id: int,
+    liquidity_tolerance_pips: float = 15.0,
+    order_block_tolerance_pips: float = 10.0,
+    digits: int = 5,
+    point: float = 0.00001,
+    fvg_tolerance_pips: float = 10.0,
+) -> int:
+    """
+    Score setups with liquidity, order-block, FVG, structure, SMT,
+    and recorded-session confluence.
+
+    Structure and SMT are scored only from same-direction M15/H1 rows
+    recorded in the 24 hours before setup detection. Session scoring
+    uses existing session boundaries only; no hours or timezones are
+    inferred. Previous scoring versions remain available unchanged.
+    """
+    true_pip = _true_pip_size(digits, point)
+    liquidity_tolerance = liquidity_tolerance_pips * true_pip
+    order_block_tolerance = order_block_tolerance_pips * true_pip
+    fvg_tolerance = fvg_tolerance_pips * true_pip
+
+    setups = db.query(CrtSetup).filter_by(instrument_id=instrument_id).all()
+    processed_count = 0
+
+    for setup in setups:
+        matched_zone = _find_matching_zone(db, instrument_id, setup, liquidity_tolerance)
+        liquidity_score = matched_zone.strength_score if matched_zone else 0
+
+        matched_block = _find_matching_order_block(
+            db, instrument_id, setup, order_block_tolerance
+        )
+        order_block_score = 5 if matched_block else 0
+
+        matched_fvg = _find_matching_fvg(db, instrument_id, setup, fvg_tolerance)
+        fvg_score = FVG_MATCH_SCORE if matched_fvg else 0
+
+        event_window_start = setup.detected_at - EVENT_CONFLUENCE_LOOKBACK
+        structure_match = (
+            db.query(MarketStructure.id)
+            .filter(
+                MarketStructure.instrument_id == instrument_id,
+                MarketStructure.timeframe.in_(CONFLUENCE_TIMEFRAMES),
+                MarketStructure.direction == setup.setup_direction,
+                MarketStructure.occurred_at >= event_window_start,
+                MarketStructure.occurred_at < setup.detected_at,
+            )
+            .first()
+        )
+        structure_score = STRUCTURE_MATCH_SCORE if structure_match else 0
+
+        smt_match = (
+            db.query(SmtDivergence.id)
+            .filter(
+                SmtDivergence.instrument_id == instrument_id,
+                SmtDivergence.correlated_instrument_id != instrument_id,
+                SmtDivergence.timeframe.in_(CONFLUENCE_TIMEFRAMES),
+                SmtDivergence.divergence_type == setup.setup_direction,
+                SmtDivergence.detected_at >= event_window_start,
+                SmtDivergence.detected_at < setup.detected_at,
+            )
+            .first()
+        )
+        smt_score = SMT_MATCH_SCORE if smt_match else 0
+
+        session_match = (
+            db.query(TradingSession.id)
+            .filter(
+                TradingSession.instrument_id == instrument_id,
+                TradingSession.start_time <= setup.detected_at,
+                TradingSession.end_time > setup.detected_at,
+            )
+            .first()
+        )
+        session_score = SESSION_MATCH_SCORE if session_match else 0
+
+        confirmation_bonus = 3 if setup.phase == "DISTRIBUTION" else 0
+        total = (
+            liquidity_score
+            + order_block_score
+            + fvg_score
+            + structure_score
+            + smt_score
+            + session_score
+            + confirmation_bonus
+        )
+
+        existing_score = db.query(SetupScore).filter_by(crt_setup_id=setup.id).first()
+        if existing_score:
+            existing_score.liquidity_score = liquidity_score
+            existing_score.order_block_score = order_block_score
+            existing_score.fvg_score = fvg_score
+            existing_score.structure_score = structure_score
+            existing_score.smt_score = smt_score
+            existing_score.session_score = session_score
+            existing_score.total_score = total
+        else:
+            db.add(
+                SetupScore(
+                    crt_setup_id=setup.id,
+                    liquidity_score=liquidity_score,
+                    order_block_score=order_block_score,
+                    fvg_score=fvg_score,
+                    structure_score=structure_score,
+                    smt_score=smt_score,
+                    session_score=session_score,
                     total_score=total,
                 )
             )
