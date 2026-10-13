@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from core.market_analysis.fvg_detector import detect_and_store_fvgs, detect_fvgs
@@ -70,11 +71,12 @@ class DetectFvgsTests(unittest.TestCase):
     def test_detect_and_store_replaces_rows_for_the_requested_scope(self):
         from app.models.models import Candle, FairValueGap
 
+        candle_start = datetime(2025, 1, 1, tzinfo=timezone.utc)
         candle_rows = [
-            SimpleNamespace(open_time=1, high=10.0, low=8.0),
-            SimpleNamespace(open_time=2, high=12.0, low=9.0),
-            SimpleNamespace(open_time=3, high=14.0, low=11.0),
-            SimpleNamespace(open_time=4, high=13.0, low=10.5),
+            SimpleNamespace(open_time=candle_start, high=10.0, low=8.0),
+            SimpleNamespace(open_time=candle_start + timedelta(minutes=15), high=12.0, low=9.0),
+            SimpleNamespace(open_time=candle_start + timedelta(minutes=30), high=14.0, low=11.0),
+            SimpleNamespace(open_time=candle_start + timedelta(minutes=45), high=13.0, low=10.5),
         ]
 
         class FakeQuery:
@@ -130,10 +132,22 @@ class DetectFvgsTests(unittest.TestCase):
         self.assertEqual(db.fvg_model.fill_percentage, 50.0)
         self.assertEqual(db.fvg_model.instrument_id, 7)
         self.assertEqual(db.fvg_model.timeframe, "M15")
+        self.assertEqual(
+            db.fvg_model.formed_at,
+            candle_start + timedelta(minutes=45),
+        )
         self.assertTrue(db.committed)
         self.assertFalse(db.rolled_back)
         self.assertEqual(len(db.deleted_scope), 2)
         self.assertFalse(db.synchronize_session)
+
+    def test_detect_and_store_rejects_unsupported_timeframe_before_db_access(self):
+        class UnusedDB:
+            def query(self, *_):
+                raise AssertionError("DB should not be queried for unsupported timeframe")
+
+        with self.assertRaisesRegex(ValueError, "Unsupported timeframe 'MN1'"):
+            detect_and_store_fvgs(UnusedDB(), instrument_id=7, timeframe="MN1")
 
 
 if __name__ == "__main__":

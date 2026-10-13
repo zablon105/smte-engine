@@ -9,7 +9,19 @@ detector's existing return format or pipeline behavior.
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, List, Optional
+
+
+TIMEFRAME_MINUTES = {
+    "M1": 1,
+    "M5": 5,
+    "M15": 15,
+    "M30": 30,
+    "H1": 60,
+    "H4": 240,
+    "D1": 1440,
+}
 
 
 @dataclass
@@ -138,8 +150,19 @@ def detect_and_store_fvgs(
     Existing FVG rows are replaced only for the requested instrument
     and timeframe. The delete and inserts are committed together; on
     failure the transaction is rolled back and the error is re-raised.
+
+    Stored formation time is the close time of candle 3, when the FVG
+    can first be known. Only timeframes in TIMEFRAME_MINUTES are supported.
     """
     from app.models.models import Candle, FairValueGap
+
+    minutes = TIMEFRAME_MINUTES.get(timeframe)
+    if minutes is None:
+        raise ValueError(
+            f"Unsupported timeframe '{timeframe}'. "
+            "Add it to TIMEFRAME_MINUTES in fvg_detector.py."
+        )
+    candle_length = timedelta(minutes=minutes)
 
     rows = (
         db.query(Candle.open_time, Candle.high, Candle.low)
@@ -170,7 +193,7 @@ def detect_and_store_fvgs(
                     gap_type=fvg.direction.upper(),
                     top_price=fvg.zone_high,
                     bottom_price=fvg.zone_low,
-                    formed_at=fvg.created_at,
+                    formed_at=fvg.created_at + candle_length,
                     filled_at=fvg.mitigated_at,
                     fill_percentage=fvg.fill_percentage,
                 )
