@@ -11,6 +11,7 @@ evaluate the system against.
 
 Usage (from SMTE/backend, with smte-env activated):
     python run_full_pipeline.py --min-gap-pips 1.0
+    python run_full_pipeline.py --min-score 0      (evaluation run: signals at every score)
 """
 
 from app.database.base import SessionLocal
@@ -36,11 +37,14 @@ M15_COUNT = 25000   # ~ 8-9 months of M15 bars
 H1_COUNT = 6000      # ~ 1 year of H1 bars
 H4_COUNT = 1500      # ~ 1 year of H4 bars
 
+# Default minimum confluence score for a signal to be generated.
+# Override per run with --min-score (use 0 to generate signals at every
+# score, which is what you need to test whether score predicts outcome).
 MIN_SCORE = 15
 RISK_REWARD = 2.0
 
 
-def run_for_symbol(symbol: str, min_gap_pips: float = 1.0):
+def run_for_symbol(symbol: str, min_gap_pips: float = 1.0, min_score: int = MIN_SCORE):
     print(f"\n{'=' * 60}")
     print(f"Processing {symbol}")
     print(f"{'=' * 60}")
@@ -100,8 +104,8 @@ def run_for_symbol(symbol: str, min_gap_pips: float = 1.0):
         print(f"[{symbol}]   scored: {scored} setups")
 
         # --- Step 7: Trade signal generation ---
-        print(f"[{symbol}] Generating trade signals...")
-        signals_created = generate_signals(db, instrument.id, MIN_SCORE, RISK_REWARD, 3.0, digits, point)
+        print(f"[{symbol}] Generating trade signals (min score {min_score})...")
+        signals_created = generate_signals(db, instrument.id, min_score, RISK_REWARD, 3.0, digits, point)
         print(f"[{symbol}]   signals created: {signals_created}")
 
         # --- Step 8: Backtest ---
@@ -113,12 +117,14 @@ def run_for_symbol(symbol: str, min_gap_pips: float = 1.0):
         db.close()
 
 
-def main(min_gap_pips: float = 1.0):
+def main(min_gap_pips: float = 1.0, min_score: int = MIN_SCORE):
     all_results = []
+
+    print(f"Minimum signal score for this run: {min_score}")
 
     for symbol in SYMBOLS:
         try:
-            result = run_for_symbol(symbol, min_gap_pips)
+            result = run_for_symbol(symbol, min_gap_pips, min_score)
             if result:
                 all_results.append(result)
         except Exception as e:
@@ -172,7 +178,16 @@ if __name__ == "__main__":
         default=1.0,
         help="Ignore FVGs smaller than this pip size (default: 1.0).",
     )
+    parser.add_argument(
+        "--min-score",
+        type=int,
+        default=MIN_SCORE,
+        help=f"Minimum confluence score for a signal (default: {MIN_SCORE}). "
+             "Use 0 to generate signals at every score.",
+    )
     arguments = parser.parse_args()
     if arguments.min_gap_pips < 0:
         parser.error("--min-gap-pips must be non-negative")
-    main(arguments.min_gap_pips)
+    if arguments.min_score < 0:
+        parser.error("--min-score must be non-negative")
+    main(arguments.min_gap_pips, arguments.min_score)
