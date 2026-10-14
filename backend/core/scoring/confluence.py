@@ -87,10 +87,14 @@ def _find_matching_zone(db, instrument_id: int, setup: CrtSetup, tolerance: floa
 
 def _find_matching_order_block(db, instrument_id: int, setup, tolerance: float):
     """
-    Looks for an ACTIVE (unmitigated) order block that:
+    Looks for an order block that:
       - matches the direction implied by the setup (BULLISH setup ->
         BULLISH block, since that's where buyers likely stepped in)
       - formed before the setup's manipulation candle
+      - was still UNMITIGATED at the time of the setup. The block may
+        have been mitigated later, but that is future information a
+        trader would not have had, so it must not be used to exclude
+        the block (doing so leaks the future into the score).
       - the manipulation price falls within the block's range,
         expanded by `tolerance` on each side
     Returns the best matching block (smallest range = most precise
@@ -103,8 +107,11 @@ def _find_matching_order_block(db, instrument_id: int, setup, tolerance: float):
         .filter(
             OrderBlock.instrument_id == instrument_id,
             OrderBlock.block_type == setup.setup_direction,
-            OrderBlock.is_mitigated == False,
             OrderBlock.formed_at < setup.detected_at,
+            or_(
+                OrderBlock.is_mitigated.is_(False),
+                OrderBlock.mitigated_at >= setup.detected_at,
+            ),
         )
         .all()
     )

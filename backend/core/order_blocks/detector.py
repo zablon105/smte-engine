@@ -18,6 +18,8 @@ Beginner note on the concept:
   gradual drift.
 """
 
+from bisect import bisect_right
+
 from sqlalchemy import select
 from app.models.models import Candle, OrderBlock
 
@@ -112,23 +114,52 @@ def detect_order_blocks(
 
 
 def mark_mitigated_blocks(
-    db, instrument_id: int, timeframe: str, penetration_pct: float = 0.5
+    db,
+    instrument_id: int,
+    timeframe: str,
+    penetration_pct: float = 0.5,
+    recheck_all: bool = False,
 ) -> int:
     """
-    Checks all currently un-mitigated order blocks and marks them as
-    mitigated only if a later candle CLOSES back into at least
-    `penetration_pct` of the block's range (default 50%) - not
-    merely wicks through it. A close is a much stronger signal that
-    price genuinely absorbed the order flow in that zone, rather
-    than just briefly overlapping it.
+    Marks order blocks as mitigated when a later candle CLOSES back
+    into at least `penetration_pct` of the block's range (default
+    50%) - not merely wicks through it. A close is a much stronger
+    signal that price genuinely absorbed the order flow in that
+    zone, rather than just briefly overlapping it.
+
+    IMPORTANT: every block is checked against ALL candles after it
+    formed. An earlier version only looked at the most recent 2000
+    candles (about 3 weeks of M15), so any block that price had
+    closed through earlier than that was wrongly left "unmitigated".
+    mitigated_at records the FIRST candle that closed through the
+    block, which is what lets scoring ask "was this block still
+    active at the time of the setup?"
+
+    recheck_all=False (default): only blocks currently marked
+        unmitigated are checked. Returns how many were newly
+        marked mitigated.
+    recheck_all=True: every block is recomputed from scratch, which
+        also corrects wrong flags left by the old 2000-candle limit.
+        Returns how many blocks changed (status or mitigated time).
     """
-    candles = _fetch_candles(db, instrument_id, timeframe, lookback=2000)
-    blocks = (
-        db.query(OrderBlock)
-        .filter_by(instrument_id=instrument_id, timeframe=timeframe, is_mitigated=False)
+    # Lightweight read: only the two columns we need, in time order.
+    rows = (
+        db.query(Candle.open_time, Candle.close)
+        .filter(Candle.instrument_id == instrument_id, Candle.timeframe == timeframe)
+        .order_by(Candle.open_time.asc())
         .all()
     )
-    mitigated_count = 0
+    open_times = [row[0] for row in rows]
+    closes = [float(row[1]) for row in rows]
+
+    query = db.query(OrderBlock).filter_by(
+        instrument_id=instrument_id, timeframe=timeframe
+    )
+    if not recheck_all:
+        query = query.filter_by(is_mitigated=False)
+    blocks = query.all()
+
+    changed_count = 0
 
     for block in blocks:
         block_high = float(block.high_price)
@@ -142,21 +173,29 @@ def mark_mitigated_blocks(
         else:
             threshold = block_low + (block_range * penetration_pct)
 
-        for candle in candles:
-            if candle.open_time <= block.formed_at:
-                continue
+        # First candle strictly AFTER the block's own candle.
+        start_index = bisect_right(open_times, block.formed_at)
 
-            close_price = float(candle.close)
+        mitigation_time = None
+        for index in range(start_index, len(open_times)):
+            close_price = closes[index]
             if block.block_type == "BULLISH" and close_price < threshold:
-                block.is_mitigated = True
-                block.mitigated_at = candle.open_time
-                mitigated_count += 1
+                mitigation_time = open_times[index]
                 break
             elif block.block_type == "BEARISH" and close_price > threshold:
-                block.is_mitigated = True
-                block.mitigated_at = candle.open_time
-                mitigated_count += 1
+                mitigation_time = open_times[index]
                 break
 
+        if mitigation_time is not None:
+            if not block.is_mitigated or block.mitigated_at != mitigation_time:
+                block.is_mitigated = True
+                block.mitigated_at = mitigation_time
+                changed_count += 1
+        elif recheck_all and block.is_mitigated:
+            # Wrongly flagged earlier: nothing has actually closed through it.
+            block.is_mitigated = False
+            block.mitigated_at = None
+            changed_count += 1
+
     db.commit()
-    return mitigated_count
+    return changed_count
