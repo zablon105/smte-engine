@@ -20,13 +20,18 @@ How the test works:
      like RANDOM, and both should look like THEORY: in a coin-flip market a
      1R target beats a 1R stop 50% of the time, 2R 33.3%, 3R 25%.
 
+DATE WINDOW: --start and --end limit the study to trades entered inside a
+window (for example, older data that was never examined before). If
+--cutoff is not given, the trades are split into two equal halves at their
+median entry date.
+
 Usage (from SMTE/backend, with smte-env activated):
     python -m strategy_backtest.excursion_report
     python -m strategy_backtest.excursion_report --horizon 96 --random-per-signal 30
+    python -m strategy_backtest.excursion_report --end 2025-09-01
 """
 
 import argparse
-from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -34,7 +39,15 @@ import pandas as pd
 from app.database.base import SessionLocal
 from app.models.models import Candle, CrtSetup, TradeSignal
 from strategy_backtest.signal_backtest import _find_confirmation_time, backtest_signal
-from strategy_backtest.split_report import one_trade_at_a_time, wilson_interval
+from strategy_backtest.split_report import (
+    PREFILTER_MARGIN,
+    describe_window,
+    filter_window,
+    median_entry_time,
+    one_trade_at_a_time,
+    parse_date,
+    wilson_interval,
+)
 
 ATR_PERIOD = 14
 
@@ -135,13 +148,18 @@ def simulate_path(high, low, close, start, sign, entry, risk, horizon, targets):
     }
 
 
-def collect_trades(db, timeframe):
-    """Every signal with a confirmed entry, plus when its trade would have ended."""
-    rows = (
+def collect_trades(db, timeframe, start=None, end=None):
+    """Every signal (in the window) with a confirmed entry, plus when its trade would have ended."""
+    query = (
         db.query(TradeSignal, CrtSetup)
         .join(CrtSetup, CrtSetup.id == TradeSignal.crt_setup_id)
-        .all()
     )
+    if end is not None:
+        query = query.filter(CrtSetup.detected_at < end)
+    if start is not None:
+        query = query.filter(CrtSetup.detected_at >= start - PREFILTER_MARGIN)
+    rows = query.all()
+
     trades = []
     for signal, setup in rows:
         entry_time = _find_confirmation_time(db, setup, timeframe)
@@ -197,8 +215,14 @@ def print_period(title, signal_sims, random_sims, targets):
 
 def main():
     parser = argparse.ArgumentParser(description="Signals versus a matched random-entry baseline.")
-    parser.add_argument("--cutoff", default="2026-05-01",
-                        help="YYYY-MM-DD: entries before this date count as the 'earlier' period")
+    parser.add_argument("--cutoff", type=parse_date, default=None,
+                        help="YYYY-MM-DD: entries before this date count as the 'earlier' period. "
+                             "Default: the median entry date (two equal halves). "
+                             "Use 2026-05-01 to reproduce the old split.")
+    parser.add_argument("--start", type=parse_date, default=None,
+                        help="YYYY-MM-DD: only trades entered on/after this date")
+    parser.add_argument("--end", type=parse_date, default=None,
+                        help="YYYY-MM-DD: only trades entered before this date")
     parser.add_argument("--horizon", type=int, default=288,
                         help="Candles to follow each entry (288 = 3 days of M15)")
     parser.add_argument("--random-per-signal", type=int, default=20,
@@ -213,14 +237,24 @@ def main():
         parser.error("--horizon must be at least 1")
     if args.random_per_signal < 1:
         parser.error("--random-per-signal must be at least 1")
+    if args.start and args.end and args.start >= args.end:
+        parser.error("--start must be earlier than --end")
 
-    cutoff = datetime.strptime(args.cutoff, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     rng = np.random.default_rng(args.seed)
 
     db = SessionLocal()
     try:
-        all_trades = collect_trades(db, args.timeframe)
+        all_trades = filter_window(
+            collect_trades(db, args.timeframe, args.start, args.end), args.start, args.end
+        )
         trades, skipped_overlap = one_trade_at_a_time(all_trades)
+
+        if not trades:
+            print("No trades found in this window.")
+            return
+
+        cutoff = args.cutoff or median_entry_time(trades)
+        cutoff_label = cutoff.strftime("%Y-%m-%d")
 
         series_cache = {}
         signal_sims = []
@@ -280,7 +314,8 @@ def main():
                 sim["entry_time"] = series["times"][j]
                 random_sims.append(sim)
 
-        print(f"\nSignals with a confirmed entry: {len(all_trades)}")
+        print(f"\nWindow: {describe_window(args.start, args.end)}")
+        print(f"Signals with a confirmed entry: {len(all_trades)}")
         print(f"Skipped (trade already open on same symbol/direction): {skipped_overlap}")
         print(f"Dropped (not enough data after entry): {dropped_short}")
         print(f"Dropped (no matching random moments): {dropped_no_baseline}")
@@ -293,8 +328,8 @@ def main():
         earlier_random = [s for s in random_sims if s["entry_time"] < cutoff]
         later_random = [s for s in random_sims if s["entry_time"] >= cutoff]
 
-        print_period(f"EARLIER PERIOD (before {args.cutoff})", earlier_signals, earlier_random, args.targets)
-        print_period(f"LATER PERIOD (on/after {args.cutoff})", later_signals, later_random, args.targets)
+        print_period(f"EARLIER PERIOD (before {cutoff_label})", earlier_signals, earlier_random, args.targets)
+        print_period(f"LATER PERIOD (on/after {cutoff_label})", later_signals, later_random, args.targets)
         print_period("ALL", signal_sims, random_sims, args.targets)
 
         print("\nHow to read this:")

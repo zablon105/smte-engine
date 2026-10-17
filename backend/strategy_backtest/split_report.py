@@ -14,13 +14,19 @@ Every win rate is shown with a 95% range (Wilson interval). With only a
 few dozen trades that range is wide, and that is the honest picture of
 how much we really know.
 
+DATE WINDOW: --start and --end limit the report to trades entered inside
+a window. This is how we test on older data that was never examined
+before. If --cutoff is not given, the trades are split into two equal
+halves at their median entry date.
+
 Usage (from SMTE/backend, with smte-env activated):
     python -m strategy_backtest.split_report
     python -m strategy_backtest.split_report --cutoff 2026-05-01 --rr 2.0
+    python -m strategy_backtest.split_report --end 2025-09-01
 """
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import sqrt
 
 from app.database.base import SessionLocal
@@ -37,6 +43,43 @@ SCORE_BANDS = [
 
 LONG_AGO = datetime.min.replace(tzinfo=timezone.utc)
 FAR_FUTURE = datetime.max.replace(tzinfo=timezone.utc)
+
+# A signal can be entered some time after its setup was detected, so the
+# quick database pre-filter on setup time keeps a safety margin. The exact
+# window is applied afterwards using each trade's real entry time.
+PREFILTER_MARGIN = timedelta(days=3)
+
+
+def parse_date(text):
+    """Turn YYYY-MM-DD into a UTC datetime (used as a command-line type)."""
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a valid date, use YYYY-MM-DD")
+
+
+def describe_window(start, end):
+    first = start.strftime("%Y-%m-%d") if start else "beginning"
+    last = end.strftime("%Y-%m-%d") if end else "latest"
+    return f"{first} to {last}"
+
+
+def filter_window(trades, start, end):
+    """Keep trades entered on/after start and before end (either may be None)."""
+    kept = []
+    for trade in trades:
+        if start is not None and trade["entry_time"] < start:
+            continue
+        if end is not None and trade["entry_time"] >= end:
+            continue
+        kept.append(trade)
+    return kept
+
+
+def median_entry_time(trades):
+    """The middle entry time, used to split the trades into two equal halves."""
+    times = sorted(trade["entry_time"] for trade in trades)
+    return times[len(times) // 2] if times else None
 
 
 def wilson_interval(wins, n, z=1.96):
@@ -57,14 +100,18 @@ def band_label(score):
     return "other"
 
 
-def collect_trades(db, timeframe):
-    """Backtest every signal and return one record per tradable signal."""
-    rows = (
+def collect_trades(db, timeframe, start=None, end=None):
+    """Backtest every signal (in the window) and return one record per tradable signal."""
+    query = (
         db.query(TradeSignal, SetupScore, CrtSetup)
         .join(SetupScore, SetupScore.id == TradeSignal.setup_score_id)
         .join(CrtSetup, CrtSetup.id == TradeSignal.crt_setup_id)
-        .all()
     )
+    if end is not None:
+        query = query.filter(CrtSetup.detected_at < end)
+    if start is not None:
+        query = query.filter(CrtSetup.detected_at >= start - PREFILTER_MARGIN)
+    rows = query.all()
 
     trades = []
     for signal, score, setup in rows:
@@ -134,29 +181,47 @@ def print_period(title, trades, rr):
 
 def main():
     parser = argparse.ArgumentParser(description="Signal results with a one-trade-at-a-time rule and a time split.")
-    parser.add_argument("--cutoff", default="2026-05-01",
-                        help="YYYY-MM-DD: trades entered before this date count as the 'earlier' period")
+    parser.add_argument("--cutoff", type=parse_date, default=None,
+                        help="YYYY-MM-DD: trades entered before this date are the 'earlier' period. "
+                             "Default: the median entry date (two equal halves). "
+                             "Use 2026-05-01 to reproduce the old split.")
+    parser.add_argument("--start", type=parse_date, default=None,
+                        help="YYYY-MM-DD: only trades entered on/after this date")
+    parser.add_argument("--end", type=parse_date, default=None,
+                        help="YYYY-MM-DD: only trades entered before this date")
     parser.add_argument("--rr", type=float, default=2.0, help="Risk-reward ratio the signals were built with")
     parser.add_argument("--timeframe", default="M15")
     args = parser.parse_args()
 
-    cutoff = datetime.strptime(args.cutoff, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if args.start and args.end and args.start >= args.end:
+        parser.error("--start must be earlier than --end")
+
     break_even = 100 / (1 + args.rr)
 
     db = SessionLocal()
     try:
-        all_trades = collect_trades(db, args.timeframe)
+        all_trades = filter_window(
+            collect_trades(db, args.timeframe, args.start, args.end), args.start, args.end
+        )
         trades, skipped = one_trade_at_a_time(all_trades)
 
-        print(f"\nSignals with a confirmed entry: {len(all_trades)}")
+        if not trades:
+            print("No trades found in this window.")
+            return
+
+        cutoff = args.cutoff or median_entry_time(trades)
+        cutoff_label = cutoff.strftime("%Y-%m-%d")
+
+        print(f"\nWindow: {describe_window(args.start, args.end)}")
+        print(f"Signals with a confirmed entry: {len(all_trades)}")
         print(f"Skipped (trade already open on same symbol/direction): {skipped}")
         print(f"Trades kept: {len(trades)}")
 
         earlier = [t for t in trades if t["entry_time"] < cutoff]
         later = [t for t in trades if t["entry_time"] >= cutoff]
 
-        print_period(f"EARLIER PERIOD (entered before {args.cutoff})", earlier, args.rr)
-        print_period(f"LATER PERIOD (entered on/after {args.cutoff})", later, args.rr)
+        print_period(f"EARLIER PERIOD (entered before {cutoff_label})", earlier, args.rr)
+        print_period(f"LATER PERIOD (entered on/after {cutoff_label})", later, args.rr)
         print_period("ALL TRADES", trades, args.rr)
 
         print(f"\nBreak-even win rate at {args.rr}:1 is {break_even:.1f}%.")

@@ -5,20 +5,30 @@ was PRESENT (score above 0) versus ABSENT (score of 0). This tells us
 which factors actually carry information, instead of judging only the
 combined total score.
 
-Uses the same one-trade-at-a-time rule and time split as split_report.py.
+Uses the same one-trade-at-a-time rule and time split as split_report.py,
+including the --start / --end date window. If --cutoff is not given, the
+trades are split into two equal halves at their median entry date.
 
 Usage (from SMTE/backend, with smte-env activated):
     python -m strategy_backtest.factor_report
     python -m strategy_backtest.factor_report --cutoff 2026-05-01 --rr 2.0
+    python -m strategy_backtest.factor_report --end 2025-09-01
 """
 
 import argparse
-from datetime import datetime, timezone
 
 from app.database.base import SessionLocal
 from app.models.models import CrtSetup, SetupScore, TradeSignal
 from strategy_backtest.signal_backtest import _find_confirmation_time, backtest_signal
-from strategy_backtest.split_report import one_trade_at_a_time, wilson_interval
+from strategy_backtest.split_report import (
+    PREFILTER_MARGIN,
+    describe_window,
+    filter_window,
+    median_entry_time,
+    one_trade_at_a_time,
+    parse_date,
+    wilson_interval,
+)
 
 # (display name, column on the setup_scores table)
 FACTORS = [
@@ -31,14 +41,18 @@ FACTORS = [
 ]
 
 
-def collect_trades(db, timeframe):
-    """Backtest every signal and keep each trade's per-factor scores."""
-    rows = (
+def collect_trades(db, timeframe, start=None, end=None):
+    """Backtest every signal (in the window) and keep each trade's per-factor scores."""
+    query = (
         db.query(TradeSignal, SetupScore, CrtSetup)
         .join(SetupScore, SetupScore.id == TradeSignal.setup_score_id)
         .join(CrtSetup, CrtSetup.id == TradeSignal.crt_setup_id)
-        .all()
     )
+    if end is not None:
+        query = query.filter(CrtSetup.detected_at < end)
+    if start is not None:
+        query = query.filter(CrtSetup.detected_at >= start - PREFILTER_MARGIN)
+    rows = query.all()
 
     trades = []
     for signal, score, setup in rows:
@@ -87,29 +101,47 @@ def print_period(title, trades):
 
 def main():
     parser = argparse.ArgumentParser(description="Win rate with each confluence factor present vs absent.")
-    parser.add_argument("--cutoff", default="2026-05-01",
-                        help="YYYY-MM-DD: trades entered before this date count as the 'earlier' period")
+    parser.add_argument("--cutoff", type=parse_date, default=None,
+                        help="YYYY-MM-DD: trades entered before this date are the 'earlier' period. "
+                             "Default: the median entry date (two equal halves). "
+                             "Use 2026-05-01 to reproduce the old split.")
+    parser.add_argument("--start", type=parse_date, default=None,
+                        help="YYYY-MM-DD: only trades entered on/after this date")
+    parser.add_argument("--end", type=parse_date, default=None,
+                        help="YYYY-MM-DD: only trades entered before this date")
     parser.add_argument("--rr", type=float, default=2.0, help="Risk-reward ratio the signals were built with")
     parser.add_argument("--timeframe", default="M15")
     args = parser.parse_args()
 
-    cutoff = datetime.strptime(args.cutoff, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if args.start and args.end and args.start >= args.end:
+        parser.error("--start must be earlier than --end")
+
     break_even = 100 / (1 + args.rr)
 
     db = SessionLocal()
     try:
-        all_trades = collect_trades(db, args.timeframe)
+        all_trades = filter_window(
+            collect_trades(db, args.timeframe, args.start, args.end), args.start, args.end
+        )
         trades, skipped = one_trade_at_a_time(all_trades)
 
-        print(f"\nSignals with a confirmed entry: {len(all_trades)}")
+        if not trades:
+            print("No trades found in this window.")
+            return
+
+        cutoff = args.cutoff or median_entry_time(trades)
+        cutoff_label = cutoff.strftime("%Y-%m-%d")
+
+        print(f"\nWindow: {describe_window(args.start, args.end)}")
+        print(f"Signals with a confirmed entry: {len(all_trades)}")
         print(f"Skipped (trade already open on same symbol/direction): {skipped}")
         print(f"Trades kept: {len(trades)}")
 
         earlier = [t for t in trades if t["entry_time"] < cutoff]
         later = [t for t in trades if t["entry_time"] >= cutoff]
 
-        print_period(f"EARLIER PERIOD (entered before {args.cutoff})", earlier)
-        print_period(f"LATER PERIOD (entered on/after {args.cutoff})", later)
+        print_period(f"EARLIER PERIOD (entered before {cutoff_label})", earlier)
+        print_period(f"LATER PERIOD (entered on/after {cutoff_label})", later)
         print_period("ALL TRADES", trades)
 
         print(f"\nBreak-even win rate at {args.rr}:1 is {break_even:.1f}%.")
