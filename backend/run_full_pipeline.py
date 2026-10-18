@@ -25,6 +25,10 @@ from core.order_blocks.detector import detect_order_blocks, mark_mitigated_block
 from core.liquidity.detector import detect_liquidity_zones, mark_swept_zones
 from core.crt.detector import detect_crt_setups_mtf
 from core.market_analysis.fvg_detector import detect_and_store_fvgs
+from core.market_structure.detector import detect_market_structure
+from core.sessions.builder import populate_sessions
+from core.smt.detector import detect_all_smt_divergences
+from core.dol.targeter import identify_dol_targets, update_dol_targets
 from core.scoring.confluence import score_crt_setups_v4
 from core.execution.signal_generator import generate_signals
 from strategy_backtest.signal_backtest import backtest_all_signals
@@ -122,6 +126,29 @@ def run_for_symbol(
                 db, instrument.id, tf, min_gap_size
             )
             print(f"[{symbol}]   FVG [{tf}]: {fvg_created} stored")
+
+        # --- Step 5b: Market Structure (M15 and H1) ---
+        print(f"[{symbol}] Detecting market structure (BOS/CHOCH)...")
+        for tf in ("M15", "H1"):
+            ms_created = detect_market_structure(db, instrument.id, tf, counts[tf])
+            print(f"[{symbol}]   structure [{tf}]: {ms_created} created")
+
+        # --- Step 5c: Trading Sessions (ASIA, LONDON, NEWYORK) ---
+        print(f"[{symbol}] Populating trading sessions...")
+        sessions_populated = populate_sessions(db, instrument.id, "M15", counts["M15"])
+        print(f"[{symbol}]   sessions: {sessions_populated} updated/created")
+
+        # --- Step 5d: SMT Divergence (M15 and H1) ---
+        print(f"[{symbol}] Detecting SMT divergence...")
+        for tf in ("M15", "H1"):
+            smt_created = detect_all_smt_divergences(db, instrument.id, tf, counts[tf])
+            print(f"[{symbol}]   SMT [{tf}]: {smt_created} created")
+
+        # --- Step 5e: Draw on Liquidity (DOL) ---
+        print(f"[{symbol}] Updating Draw on Liquidity (DOL) targets...")
+        for tf in ("H1", "H4"):
+            identify_dol_targets(db, instrument.id, tf)
+        update_dol_targets(db, instrument.id, "M15", counts["M15"])
 
         # --- Step 6: Confluence scoring ---
         print(f"[{symbol}] Scoring setups...")
