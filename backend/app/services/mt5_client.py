@@ -85,3 +85,55 @@ def fetch_candles_by_range(symbol: str, timeframe_str: str, date_from: datetime,
             f"copy_rates_range failed for {symbol} {timeframe_str}: {mt5.last_error()}"
         )
     return rates
+
+
+def get_account_info():
+    """Returns MT5 account details including balance and equity."""
+    info = mt5.account_info()
+    if info is None:
+        raise RuntimeError(f"account_info failed: {mt5.last_error()}")
+    return info
+
+
+def get_symbol_tick(symbol: str):
+    """Returns the latest tick (bid, ask, last, volume, time) for a symbol."""
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"symbol_info_tick failed for {symbol}: {mt5.last_error()}")
+    return tick
+
+
+def send_order(request: dict):
+    """Sends a trade request to the MT5 broker terminal."""
+    result = mt5.order_send(request)
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        err = mt5.last_error() if result is None else result.comment
+        raise RuntimeError(f"order_send failed: {err}")
+    return result
+
+
+def modify_position(ticket: int, sl: float, tp: float):
+    """Modifies the stop-loss and take-profit of an open MT5 position."""
+    request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "position": ticket,
+        "sl": sl,
+        "tp": tp,
+    }
+    result = mt5.order_send(request)
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        err = mt5.last_error() if result is None else result.comment
+        raise RuntimeError(f"modify_position failed for ticket {ticket}: {err}")
+    return result
+
+
+def get_positions(symbol: str = None):
+    """Returns open positions, optionally filtered by symbol."""
+    if symbol:
+        return mt5.positions_get(symbol=symbol)
+    return mt5.positions_get()
+
+
+def get_position_deals(ticket: int):
+    """Fetches deal history associated with a position ticket."""
+    return mt5.history_deals_get(position=ticket)
