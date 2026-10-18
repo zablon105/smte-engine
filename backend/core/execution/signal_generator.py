@@ -13,7 +13,9 @@ candle's close reflects the earliest realistic point a trader could
 have acted on the now-confirmed setup.
 """
 
-from app.models.models import Candle, CrtSetup, SetupScore, TradeSignal
+from datetime import timedelta
+from typing import Optional
+from app.models.models import Candle, CrtSetup, MarketStructure, SetupScore, TradeSignal
 
 
 def _true_pip_size(digits: int, point: float) -> float:
@@ -64,17 +66,23 @@ def generate_signals(
     stop_buffer_pips: float = 3.0,
     digits: int = 5,
     point: float = 0.00001,
+    max_risk_pips: Optional[float] = None,
+    killzones_only: bool = False,
+    require_htf_alignment: bool = False,
 ) -> int:
     """
     Scans setup_scores for setups meeting the minimum score threshold
-    and generates a TradeSignal for each one that doesn't already
-    have one.
+    and generates a TradeSignal for each one that doesn't already have one.
 
     Entry is the CONFIRMATION candle's close (the realistic point a
-    trader could act, now that distribution is confirmed) - not the
-    original range level. Stop-loss is still anchored to the
-    manipulation wick's extreme (the invalidation point). Take-profit
-    is a fixed risk-reward multiple of that stop distance from entry.
+    trader could act, now that distribution is confirmed). Stop-loss is
+    anchored to the manipulation wick's extreme (the invalidation point).
+    Take-profit is a fixed risk-reward multiple of that stop distance.
+
+    Filters available for high-probability setups:
+      - `max_risk_pips`: rejects overextended entries with huge stop distances
+      - `killzones_only`: limits signals to London (07:00-10:00 UTC) and NY (12:00-15:00 UTC)
+      - `require_htf_alignment`: requires higher-timeframe (H1/H4) BOS alignment
     """
     true_pip = _true_pip_size(digits, point)
     stop_buffer = stop_buffer_pips * true_pip
@@ -99,7 +107,32 @@ def generate_signals(
 
         confirmation_candle = _find_confirmation_candle(db, setup)
         if confirmation_candle is None:
-            continue  # shouldn't happen since phase=DISTRIBUTION implies this exists, but guard anyway
+            continue
+
+        # Filter 1: Killzone timing (London Open 07-10 UTC, NY Open 12-15 UTC)
+        if killzones_only:
+            c_time = confirmation_candle.open_time
+            if hasattr(c_time, "hour"):
+                h = c_time.hour
+                in_kz = (7 <= h < 10) or (12 <= h < 15)
+                if not in_kz:
+                    continue
+
+        # Filter 2: Higher-Timeframe Market Structure alignment
+        if require_htf_alignment:
+            htf_match = (
+                db.query(MarketStructure.id)
+                .filter(
+                    MarketStructure.instrument_id == instrument_id,
+                    MarketStructure.timeframe.in_(("H1", "H4")),
+                    MarketStructure.direction == setup.setup_direction,
+                    MarketStructure.occurred_at >= setup.detected_at - timedelta(hours=48),
+                    MarketStructure.occurred_at <= confirmation_candle.open_time,
+                )
+                .first()
+            )
+            if not htf_match:
+                continue
 
         manipulation_price = float(setup.manipulation_price)
         entry_price = float(confirmation_candle.close)
@@ -116,7 +149,11 @@ def generate_signals(
             take_profit = entry_price - (risk_distance * risk_reward_ratio)
 
         if risk_distance <= 0:
-            continue  # invalid geometry (e.g. entry already beyond stop), skip
+            continue
+
+        # Filter 3: Maximum stop-loss risk distance (filters overextended breakout bars)
+        if max_risk_pips is not None and risk_distance > (max_risk_pips * true_pip):
+            continue
 
         signal = TradeSignal(
             instrument_id=instrument_id,
