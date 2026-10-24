@@ -17,6 +17,9 @@ import MetaTrader5 as mt5
 # internal timeframe constants.
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
+    "M2": mt5.TIMEFRAME_M2,
+    "M3": mt5.TIMEFRAME_M3,
+    "M4": mt5.TIMEFRAME_M4,
     "M5": mt5.TIMEFRAME_M5,
     "M15": mt5.TIMEFRAME_M15,
     "M30": mt5.TIMEFRAME_M30,

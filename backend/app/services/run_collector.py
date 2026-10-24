@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description="Collect MT5 candle data into the SMTE database.")
     parser.add_argument("--symbol", required=True, help="Exact MT5 symbol name, e.g. EURUSD.m")
     parser.add_argument("--timeframe", required=True, choices=[
-        "M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"
+        "M1", "M2", "M3", "M4", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"
     ])
     parser.add_argument("--count", type=int, default=1000, help="Number of recent candles to fetch")
     args = parser.parse_args()
