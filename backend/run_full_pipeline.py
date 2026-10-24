@@ -36,7 +36,7 @@ from strategy_backtest.signal_backtest import backtest_all_signals
 
 SYMBOLS = [
     "EURUSD.m", "GBPUSD.m", "USDJPY.m", "USDCHF.m",
-    "AUDUSD.m", "USDCAD.m", "NZDUSD.m", "XAUUSD.m",
+    "AUDUSD.m", "USDCAD.m", "NZDUSD.m", "XAUUSD.m", "BTCUSD.m",
 ]
 
 # Candle counts for routine runs (roughly a year of data per timeframe)
