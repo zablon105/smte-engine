@@ -15,7 +15,8 @@ Beginner note on Trade Execution:
      (Breakeven). This guarantees that a winning trade will never turn into a loss.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 import MetaTrader5 as mt5
 
 from app.models.models import Instrument, Trade, TradeSignal
@@ -30,14 +31,35 @@ from app.services.risk_manager import (
 DEFAULT_MAGIC_NUMBER = 888123
 
 
+def get_filling_type(symbol: str) -> int:
+    """
+    Determines whether to use ORDER_FILLING_FOK, ORDER_FILLING_IOC, or RETURN
+    based on broker symbol filling mode flags.
+    """
+    info = mt5.symbol_info(symbol)
+    if info is not None and info.filling_mode:
+        if info.filling_mode & 1:  # SYMBOL_FILLING_FOK
+            return mt5.ORDER_FILLING_FOK
+        if info.filling_mode & 2:  # SYMBOL_FILLING_IOC
+            return mt5.ORDER_FILLING_IOC
+    return mt5.ORDER_FILLING_RETURN
+
+
+
 def execute_pending_signals(
     db,
     magic: int = DEFAULT_MAGIC_NUMBER,
     max_slippage_points: int = 20,
+    max_age_minutes: int = 60,
+    dry_run: bool = False,
 ) -> int:
     """
     Scans for PENDING TradeSignals, verifies risk parameters, and executes
     market orders directly on the MT5 broker terminal.
+
+    `max_age_minutes`: ignores signals generated older than X minutes ago
+    to prevent executing stale historical signals (default 60 min).
+    `dry_run`: simulates risk calculation and order structure without placing.
 
     Returns the number of successfully executed trades.
     """
@@ -58,8 +80,19 @@ def execute_pending_signals(
 
         executed_count = 0
         risk_params = get_or_create_risk_parameters(db)
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=max_age_minutes) if max_age_minutes else None
 
         for signal in pending_signals:
+            # Stale signal check
+            if cutoff and signal.generated_at:
+                sig_time = signal.generated_at
+                if sig_time.tzinfo is None:
+                    sig_time = sig_time.replace(tzinfo=timezone.utc)
+                if sig_time < cutoff:
+                    signal.status = "EXPIRED"
+                    continue
+
             allowed, reason = can_open_new_trade(db)
             if not allowed:
                 print(f"[Execution Engine] Trade skipped: {reason}")
@@ -98,8 +131,13 @@ def execute_pending_signals(
                 "magic": magic,
                 "comment": f"SMTE_SIG_{signal.id}",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": get_filling_type(symbol),
             }
+
+            if dry_run:
+                print(f"[Execution Engine - DRY RUN] Would execute {signal.signal_direction} {lot_size} lots on {symbol} @ {current_price} (SL: {signal.stop_loss}, TP: {signal.take_profit})")
+                executed_count += 1
+                continue
 
             try:
                 result = mt5_client.send_order(request)
@@ -125,6 +163,91 @@ def execute_pending_signals(
 
         db.commit()
         return executed_count
+    finally:
+        mt5_client.disconnect()
+
+
+def send_test_order(
+    db,
+    symbol: str = "EURUSD.m",
+    direction: str = "BUY",
+    lot_size: float = 0.01,
+    sl_pips: float = 20.0,
+    tp_pips: float = 40.0,
+    magic: int = DEFAULT_MAGIC_NUMBER,
+) -> Optional[int]:
+    """
+    Submits a small test market order (default 0.01 lots) to verify
+    end-to-end broker communication, order placement, and trade tracking.
+    """
+    mt5_client.connect()
+    try:
+        instrument = db.query(Instrument).filter_by(symbol=symbol).first()
+        if instrument is None:
+            print(f"[Test Order] Instrument '{symbol}' not found in DB.")
+            return None
+
+        tick = mt5_client.get_symbol_tick(symbol)
+        if tick is None:
+            print(f"[Test Order] Could not fetch tick for '{symbol}'.")
+            return None
+
+        point = float(instrument.pip_size)
+        if "BTC" in symbol.upper():
+            true_pip = 10.0  # $10 per pip unit so 20 pips = $200 SL, 40 pips = $400 TP
+        elif instrument.digits in (3, 5):
+            true_pip = point * 10
+        else:
+            true_pip = point
+
+        if direction.upper() == "BUY":
+            order_type = mt5.ORDER_TYPE_BUY
+            price = tick.ask
+            sl = price - (sl_pips * true_pip)
+            tp = price + (tp_pips * true_pip)
+        else:
+            order_type = mt5.ORDER_TYPE_SELL
+            price = tick.bid
+            sl = price + (sl_pips * true_pip)
+            tp = price - (tp_pips * true_pip)
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": lot_size,
+            "type": order_type,
+            "price": price,
+            "sl": round(sl, instrument.digits),
+            "tp": round(tp, instrument.digits),
+            "deviation": 20,
+            "magic": magic,
+            "comment": "SMTE_TEST_ORDER",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": get_filling_type(symbol),
+        }
+
+        print(f"[Test Order] Submitting {direction} {lot_size} {symbol} @ {price} (SL: {sl:.5f}, TP: {tp:.5f})...")
+        result = mt5_client.send_order(request)
+        print(f"[Test Order] SUCCESS! Ticket #{result.order} placed at price {result.price}")
+
+        # Record trade in DB
+        trade = Trade(
+            instrument_id=instrument.id,
+            mt5_ticket=result.order,
+            direction=direction.upper(),
+            lot_size=lot_size,
+            entry_price=result.price,
+            stop_loss=round(sl, instrument.digits),
+            take_profit=round(tp, instrument.digits),
+            opened_at=datetime.now(timezone.utc),
+            status="OPEN",
+        )
+        db.add(trade)
+        db.commit()
+        return result.order
+    except Exception as e:
+        print(f"[Test Order] Order submission failed: {e}")
+        return None
     finally:
         mt5_client.disconnect()
 
