@@ -52,6 +52,8 @@ def execute_pending_signals(
     max_slippage_points: int = 20,
     max_age_minutes: int = 60,
     dry_run: bool = False,
+    fixed_lots: Optional[float] = None,
+    max_lots: float = 0.10,
 ) -> int:
     """
     Scans for PENDING TradeSignals, verifies risk parameters, and executes
@@ -107,14 +109,18 @@ def execute_pending_signals(
             if tick is None:
                 continue
 
-            # Calculate dynamic lot size based on account equity and stop loss
-            lot_size = calculate_lot_size(
-                account_equity=account_equity,
-                risk_pct=float(risk_params.max_risk_per_trade_pct),
-                entry_price=float(signal.entry_price),
-                stop_loss=float(signal.stop_loss),
-                contract_size=float(instrument.contract_size or 100000.0),
-            )
+            # Lot sizing: uniform fixed lots for testing safety or dynamic 1% risk capped by max_lots
+            if fixed_lots is not None and fixed_lots > 0:
+                lot_size = fixed_lots
+            else:
+                lot_size = calculate_lot_size(
+                    account_equity=account_equity,
+                    risk_pct=float(risk_params.max_risk_per_trade_pct),
+                    entry_price=float(signal.entry_price),
+                    stop_loss=float(signal.stop_loss),
+                    contract_size=float(instrument.contract_size or 100000.0),
+                    max_lot=max_lots,
+                )
 
             order_type = mt5.ORDER_TYPE_BUY if signal.signal_direction == "BUY" else mt5.ORDER_TYPE_SELL
             current_price = tick.ask if signal.signal_direction == "BUY" else tick.bid

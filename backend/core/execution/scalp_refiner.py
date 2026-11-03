@@ -53,7 +53,9 @@ class ScalpEntry:
     invalidation_price: float
 
 
-def _true_pip_size(digits: int, point: float) -> float:
+def _true_pip_size(digits: int, point: float, symbol: str = "") -> float:
+    if "BTC" in symbol.upper():
+        return 10.0
     if digits in (3, 5):
         return point * 10
     return point
@@ -238,7 +240,7 @@ def refine_setup_to_scalp_entry(
     If `live_candles` is provided, evaluates against those (e.g. pulled from MT5).
     Otherwise queries historical LTF candles stored in PostgreSQL.
     """
-    true_pip = _true_pip_size(instrument.digits, float(instrument.pip_size))
+    true_pip = _true_pip_size(instrument.digits, float(instrument.pip_size), instrument.symbol)
 
     # Pull LTF candles
     if live_candles is not None:

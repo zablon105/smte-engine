@@ -15,7 +15,8 @@ have acted on the now-confirmed setup.
 
 from datetime import timedelta
 from typing import Optional
-from app.models.models import Candle, CrtSetup, MarketStructure, SetupScore, TradeSignal
+from app.models.models import Candle, CrtSetup, Instrument, MarketStructure, SetupScore, TradeSignal
+from core.execution.scalp_refiner import refine_setup_to_scalp_entry
 
 
 def _true_pip_size(digits: int, point: float) -> float:

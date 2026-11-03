@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--lots", type=float, default=0.01, help="Lot size for test order")
     parser.add_argument("--sl-pips", type=float, default=20.0, help="SL distance in pips")
     parser.add_argument("--tp-pips", type=float, default=40.0, help="TP distance in pips")
+    parser.add_argument("--fixed-lots", type=float, default=None, help="Fixed lot size (e.g. 0.01 micro-lots) for beginner safety")
+    parser.add_argument("--max-lots", type=float, default=0.10, help="Maximum allowed lot size cap (default 0.10 for testing safety)")
     parser.add_argument("--all", action="store_true", help="Execute pending signals AND sync open trades")
     args = parser.parse_args()
 
@@ -56,6 +58,8 @@ def main():
                 db,
                 dry_run=args.dry_run,
                 max_age_minutes=args.max_age_minutes,
+                fixed_lots=args.fixed_lots,
+                max_lots=args.max_lots,
             )
             print(f"[Order Executor] Executed {executed} trade(s) (dry_run={args.dry_run}).")
 

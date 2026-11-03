@@ -70,6 +70,9 @@ def fetch_candles_by_count(symbol: str, timeframe_str: str, count: int):
     timeframe = TIMEFRAME_MAP[timeframe_str]
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
     if rates is None:
+        mt5.symbol_select(symbol, True)
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+    if rates is None:
         raise RuntimeError(
             f"copy_rates_from_pos failed for {symbol} {timeframe_str}: {mt5.last_error()}"
         )
