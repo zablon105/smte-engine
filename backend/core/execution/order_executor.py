@@ -301,7 +301,7 @@ def sync_and_manage_open_trades(
                             mt5_client.modify_position(trade.mt5_ticket, sl=entry, tp=float(trade.take_profit))
                             trade.stop_loss = entry
                             be_count += 1
-                            print(f"[Trade Manager] Moved Ticket #{trade.mt5_ticket} to BREAKEVEN @ {entry}")
+                            print(f"[Trade Manager] ⚡ MOVED TO BREAKEVEN: Ticket #{trade.mt5_ticket} @ {entry:.5f} (Risk eliminated!)")
                         except Exception as e:
                             print(f"[Trade Manager] Could not move to BE: {e}")
                 else:
@@ -312,7 +312,7 @@ def sync_and_manage_open_trades(
                             mt5_client.modify_position(trade.mt5_ticket, sl=entry, tp=float(trade.take_profit))
                             trade.stop_loss = entry
                             be_count += 1
-                            print(f"[Trade Manager] Moved Ticket #{trade.mt5_ticket} to BREAKEVEN @ {entry}")
+                            print(f"[Trade Manager] ⚡ MOVED TO BREAKEVEN: Ticket #{trade.mt5_ticket} @ {entry:.5f} (Risk eliminated!)")
                         except Exception as e:
                             print(f"[Trade Manager] Could not move to BE: {e}")
             else:
@@ -326,13 +326,27 @@ def sync_and_manage_open_trades(
                     trade.profit = float(sum(d.profit + d.swap + d.commission for d in deals))
                     trade.closed_at = datetime.fromtimestamp(int(closing_deal.time), tz=timezone.utc)
                     closed_count += 1
-                    print(f"[Trade Manager] Closed Ticket #{trade.mt5_ticket}: P&L = ${trade.profit:.2f}")
+                    if trade.profit > 0:
+                        print(f"[Trade Manager] 🎯 TAKE PROFIT / WIN HIT: Ticket #{trade.mt5_ticket} | P&L = +${trade.profit:.2f}")
+                    elif trade.profit < 0:
+                        print(f"[Trade Manager] 🛡️ STOP LOSS / EXIT HIT: Ticket #{trade.mt5_ticket} | P&L = ${trade.profit:.2f}")
+                    else:
+                        print(f"[Trade Manager] ⚖️ BREAKEVEN EXIT: Ticket #{trade.mt5_ticket} | P&L = $0.00")
                 else:
                     trade.status = "CLOSED"
                     trade.closed_at = datetime.now(timezone.utc)
                     closed_count += 1
 
         db.commit()
+
+        # If any trades closed in this cycle, update performance metrics
+        if closed_count > 0:
+            try:
+                from app.services.performance_tracker import record_performance_metric
+                record_performance_metric(db)
+            except Exception as err:
+                print(f"[Performance Tracker] Metric calculation skipped: {err}")
+
         return {"managed": len(open_trades), "closed": closed_count, "breakeven_set": be_count}
     finally:
         mt5_client.disconnect()
