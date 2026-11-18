@@ -71,17 +71,20 @@ def _fetch_candles_between(db, instrument_id: int, timeframe: str, start, end):
     return db.execute(stmt).scalars().all()
 
 
-def _setup_already_exists(db, range_candle_id: int, direction: str) -> bool:
-    """
-    Prevents creating duplicate CrtSetup rows if the detector is
-    re-run over candles it has already analyzed.
-    """
-    existing = (
+def _find_existing_setup(db, range_candle_id: int, direction: str):
+    """Return a previously detected setup, if one exists."""
+    return (
         db.query(CrtSetup)
         .filter_by(range_candle_id=range_candle_id, setup_direction=direction)
         .first()
     )
-    return existing is not None
+
+
+def _distribution_confirmed(direction: str, range_high: float, range_low: float, candles) -> bool:
+    """Check whether a later candle closed beyond the opposite range edge."""
+    if direction == "BULLISH":
+        return any(candle.close > range_high for candle in candles)
+    return any(candle.close < range_low for candle in candles)
 
 
 # ============================================================
@@ -106,8 +109,6 @@ def detect_crt_setups(db, instrument_id: int, timeframe: str, lookback: int = 20
     for i in range(len(candles) - 2):
         range_candle = candles[i]
         manipulation_candle = candles[i + 1]
-        distribution_candle = candles[i + 2]
-
         direction = None
         manipulation_price = None
 
@@ -130,16 +131,18 @@ def detect_crt_setups(db, instrument_id: int, timeframe: str, lookback: int = 20
         if direction is None:
             continue  # no manipulation pattern at this position, move on
 
-        if _setup_already_exists(db, range_candle.id, direction):
-            continue  # already recorded this one, skip
-
-        # Check whether the distribution candle confirms the real move
-        if direction == "BULLISH":
-            distribution_confirmed = distribution_candle.close > manipulation_candle.close
-        else:
-            distribution_confirmed = distribution_candle.close < manipulation_candle.close
+        # Distribution confirms only after a close through the opposite
+        # boundary of the original range. It may happen after candle 3.
+        distribution_confirmed = _distribution_confirmed(
+            direction, range_candle.high, range_candle.low, candles[i + 2:]
+        )
 
         phase = "DISTRIBUTION" if distribution_confirmed else "MANIPULATION"
+        existing_setup = _find_existing_setup(db, range_candle.id, direction)
+        if existing_setup is not None:
+            if existing_setup.phase == "MANIPULATION" and distribution_confirmed:
+                existing_setup.phase = "DISTRIBUTION"
+            continue
 
         setup = CrtSetup(
             instrument_id=instrument_id,
@@ -235,7 +238,7 @@ def detect_crt_setups_mtf(
 
         # Manipulation must be found within the ORIGINAL window only
         for idx, candle in enumerate(all_lower_candles):
-            if candle.open_time > window_end:
+            if candle.open_time >= window_end:
                 break  # stop looking for manipulation once past the range window
             if candle.low < range_candle.low and candle.close > range_candle.low:
                 direction = "BULLISH"
@@ -253,24 +256,24 @@ def detect_crt_setups_mtf(
         if direction is None:
             continue  # no manipulation happened in this range's window
 
-        if _setup_already_exists(db, range_candle.id, direction):
-            continue
-
         # Distribution confirmation now requires a CLOSE BEYOND THE
         # OPPOSITE RANGE BOUNDARY - not just beyond the manipulation
         # candle's close. This is a much stronger, more meaningful
         # signal: it means price didn't just recover from the sweep,
         # it broke clean through the OTHER side of the entire range.
-        distribution_confirmed = False
-        for candle in all_lower_candles[manipulation_index + 1:]:
-            if direction == "BULLISH" and candle.close > range_candle.high:
-                distribution_confirmed = True
-                break
-            elif direction == "BEARISH" and candle.close < range_candle.low:
-                distribution_confirmed = True
-                break
+        distribution_confirmed = _distribution_confirmed(
+            direction,
+            range_candle.high,
+            range_candle.low,
+            all_lower_candles[manipulation_index + 1:],
+        )
 
         phase = "DISTRIBUTION" if distribution_confirmed else "MANIPULATION"
+        existing_setup = _find_existing_setup(db, range_candle.id, direction)
+        if existing_setup is not None:
+            if existing_setup.phase == "MANIPULATION" and distribution_confirmed:
+                existing_setup.phase = "DISTRIBUTION"
+            continue
 
         setup = CrtSetup(
             instrument_id=instrument_id,
