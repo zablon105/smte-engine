@@ -6,10 +6,9 @@ of the setup_scores table.
 
 Beginner note on the matching logic:
   A BULLISH CRT setup's manipulation candle dips BELOW the range
-  low - that's a sweep of a BUY_SIDE liquidity zone (per our
-  liquidity detector's naming: BUY_SIDE = equal lows, stops sit
-  below). A BEARISH setup's manipulation spikes ABOVE the range
-  high - that's a sweep of a SELL_SIDE zone (equal highs).
+  low - that's a sweep of a SELL_SIDE liquidity zone (equal lows,
+  sell stops sit below). A BEARISH setup's manipulation spikes ABOVE
+  the range high - that's a sweep of a BUY_SIDE zone (equal highs).
 
   We only match a zone if it existed BEFORE the manipulation
   candle happened (a zone formed afterward can't have caused it),
@@ -41,7 +40,7 @@ EVENT_CONFLUENCE_LOOKBACK = timedelta(hours=24)
 
 
 def _matching_zone_type(setup_direction: str) -> str:
-    return "BUY_SIDE" if setup_direction == "BULLISH" else "SELL_SIDE"
+    return "SELL_SIDE" if setup_direction == "BULLISH" else "BUY_SIDE"
 
 
 def _true_pip_size(digits: int, point: float) -> float:
