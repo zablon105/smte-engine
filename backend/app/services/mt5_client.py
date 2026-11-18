@@ -34,11 +34,33 @@ TIMEFRAME_MAP = {
 def connect():
     """
     Initializes the connection to the running MT5 terminal.
-    Raises a RuntimeError with the MT5 error code if it fails.
+    Attempts initialization with credentials first, falling back to default running terminal,
+    and self-heals authorization if necessary.
     """
-    if not mt5.initialize():
+    import os
+    from dotenv import load_dotenv, find_dotenv
+    load_dotenv(find_dotenv())
+    login_str = os.getenv("MT5_LOGIN", "0")
+    password = os.getenv("MT5_PASSWORD", "")
+    server = os.getenv("MT5_SERVER", "")
+
+    initialized = False
+    if login_str.isdigit() and int(login_str) > 0 and password and server:
+        initialized = mt5.initialize(login=int(login_str), password=password, server=server)
+
+    if not initialized:
+        initialized = mt5.initialize()
+
+    if not initialized:
         error = mt5.last_error()
         raise RuntimeError(f"MT5 initialize() failed, error code = {error}")
+
+    # Self-healing login check
+    acc = mt5.account_info()
+    if acc is None:
+        if login_str.isdigit() and int(login_str) > 0 and password and server:
+            mt5.login(login=int(login_str), password=password, server=server)
+
     return True
 
 
