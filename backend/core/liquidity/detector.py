@@ -105,8 +105,8 @@ def detect_liquidity_zones(
     point: float = 0.00001,
 ) -> int:
     """
-    Scans candles for clustered equal highs (SELL_SIDE liquidity)
-    and equal lows (BUY_SIDE liquidity).
+    Scans candles for clustered equal highs (BUY_SIDE liquidity)
+    and equal lows (SELL_SIDE liquidity).
 
     Returns the number of NEW liquidity zone rows created.
     """
@@ -129,12 +129,12 @@ def detect_liquidity_zones(
 
     for representative, touch_count in _cluster_swings(swing_highs, "high", tolerance):
         price_level = float(representative.high)
-        if _zone_already_exists(db, instrument_id, timeframe, "SELL_SIDE", price_level, tolerance):
+        if _zone_already_exists(db, instrument_id, timeframe, "BUY_SIDE", price_level, tolerance):
             continue
         zone = LiquidityZone(
             instrument_id=instrument_id,
             timeframe=timeframe,
-            zone_type="SELL_SIDE",
+            zone_type="BUY_SIDE",
             price_level=price_level,
             formed_at=representative.open_time,
             is_swept=False,
@@ -145,12 +145,12 @@ def detect_liquidity_zones(
 
     for representative, touch_count in _cluster_swings(swing_lows, "low", tolerance):
         price_level = float(representative.low)
-        if _zone_already_exists(db, instrument_id, timeframe, "BUY_SIDE", price_level, tolerance):
+        if _zone_already_exists(db, instrument_id, timeframe, "SELL_SIDE", price_level, tolerance):
             continue
         zone = LiquidityZone(
             instrument_id=instrument_id,
             timeframe=timeframe,
-            zone_type="BUY_SIDE",
+            zone_type="SELL_SIDE",
             price_level=price_level,
             formed_at=representative.open_time,
             is_swept=False,
@@ -180,12 +180,12 @@ def mark_swept_zones(db, instrument_id: int, timeframe: str) -> int:
         for candle in candles:
             if candle.open_time <= zone.formed_at:
                 continue
-            if zone.zone_type == "SELL_SIDE" and float(candle.high) > float(zone.price_level):
+            if zone.zone_type == "BUY_SIDE" and float(candle.high) > float(zone.price_level):
                 zone.is_swept = True
                 zone.swept_at = candle.open_time
                 swept_count += 1
                 break
-            elif zone.zone_type == "BUY_SIDE" and float(candle.low) < float(zone.price_level):
+            elif zone.zone_type == "SELL_SIDE" and float(candle.low) < float(zone.price_level):
                 zone.is_swept = True
                 zone.swept_at = candle.open_time
                 swept_count += 1
