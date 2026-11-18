@@ -3,7 +3,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![Database](https://img.shields.io/badge/database-PostgreSQL%2016-blue.svg)](https://www.postgresql.org/)
 [![Terminal](https://img.shields.io/badge/broker-MetaTrader%205-green.svg)](https://www.metatrader5.com/)
-[![Tests](https://img.shields.io/badge/tests-30%20passed-success.svg)]()
+[![Tests](https://img.shields.io/badge/tests-78%20passed-success.svg)]()
 
 **SMTE (Smart Money Trading Engine)** is an institutional-grade algorithmic trading and research platform built for Forex, Commodities (Gold), and Cryptocurrencies. It digitizes **Smart Money Concepts (SMC)**, **Candle Range Theory (CRT)**, and **ICT institutional order flow delivery models** into deterministic, mathematically verified code.
 
@@ -105,21 +105,10 @@ When you are ready to scale with percentage-based risk:
 
 ## 3. Intraday Scalping Engine (M1 / M3 / M5 / M15)
 
-The dedicated Intraday Scalper (`core/execution/run_scalper.py`) refines macro M15 setups into high-frequency scalps:
-
-| Feature | Standard M15 Entry | Precision M5/M1 Scalp Entry | Scalper Advantage |
-| :--- | :---: | :---: | :---: |
-| **EUR/USD Win Rate** | 25.0% | **75.0%** | **3x Win Rate Increase** |
-| **EUR/USD Stop Loss** | 15.0 pips | **6.2 pips** | **58% Tighter Stop** |
-| **GBP/USD Win Rate** | 75.0% | **71.4%** | Consistently High Edge |
-| **GBP/USD Stop Loss** | 16.6 pips | **11.2 pips** | **33% Tighter Stop** |
-| **Combined Forex Win Rate**| 50.0% | **72.7%** | **+22.7% Edge** |
-| **Profit Factor** | 2.00 | **4.00** | **2x Profitability** |
-| **Expected Value (EV)** | $+0.50\text{R}$ | **$+1.00\text{R}$ – $+1.18\text{R}$** | Double Expected Return |
-| **Average Trade Duration** | 2 to 4 Hours | **~ 20 to 45 Minutes** | Quick Intraday Resolutions |
+The dedicated Intraday Scalper (`core/execution/run_scalper.py`) scans for an M15 liquidity sweep followed by lower-timeframe market-structure confirmation and an optional FVG. This describes the current implementation, not evidence of profitability; validate it with historical data and demo trading before considering automated execution.
 
 ### Automatic Profit Protection (Breakeven at +1.0R):
-Once an active trade advances $+1.0\text{R}$ in floating profit, SMTE automatically modifies the position in MT5 by moving the Stop Loss to the **exact entry price** (Breakeven). The trade becomes completely risk-free, guaranteeing that a winning trade can never turn into a loss.
+During execution cycles, SMTE attempts to move an open position's stop loss to its entry price after detecting a +1.0R favorable move. This requires the monitor to be running; gaps, slippage, broker rejection, or a connection failure can still result in a loss.
 
 ---
 
@@ -157,14 +146,16 @@ SMTE/
 │   │   ├── order_blocks/     # Bullish & Bearish Order Block detection & mitigation
 │   │   ├── scoring/          # Multi-factor Confluence Scorer v4 (0 to 25 points)
 │   │   ├── sessions/         # Session populator (Asia, London, NY, Killzones)
+│   │   ├── strategy_rules/   # Non-executing research-derived rule calculations
 │   │   └── smt/              # Inter-market SMT Divergence engine
 │   ├── strategy_backtest/    # Filter comparisons, scalp benchmarks, honest split reports
-│   ├── tests/                # Automated unit test suite (30 tests)
+│   ├── tests/                # Automated unit test suite (53 tests)
 │   ├── requirements.txt
 │   ├── run_full_pipeline.py  # Full historical analysis pipeline
 │   └── rescore_all.py        # Database-wide setup rescoring utility
 ├── docker-compose.yml        # PostgreSQL (port 5433) + pgAdmin (port 5050)
 ├── .env.example              # Environment variables template
+├── docs/strategy-rules-integration.md # Research-to-engine integration map
 └── README.md
 ```
 
@@ -206,18 +197,28 @@ All commands are executed from the `c:\Users\kinzi\SMTE\backend` directory with 
 ### A. Real-Time Intraday Scalper (`run_scalper.py`)
 
 ```powershell
-# 1. Quick One-Shot Scan across all 5 active pairs (Dry Run)
+# 1. Quick One-Shot Scan across all 5 active pairs (Dry Run, default CRT strategy)
 .\..\smte-env\Scripts\python.exe -m core.execution.run_scalper --scan --dry-run
 
-# 2. Continuous Background Monitor (Scans every 60s, uniform 0.01 micro-lots)
-.\..\smte-env\Scripts\python.exe -u -m core.execution.run_scalper --monitor --interval 60 --execute --timeframe M5 --fixed-lots 0.01
+# 2. Scan using specific research strategy: --strategy [crt | unicorn | turtle_soup | po3 | all]
+.\..\smte-env\Scripts\python.exe -m core.execution.run_scalper --scan --dry-run --strategy unicorn
+.\..\smte-env\Scripts\python.exe -m core.execution.run_scalper --scan --dry-run --strategy turtle_soup
+.\..\smte-env\Scripts\python.exe -m core.execution.run_scalper --scan --dry-run --strategy all
 
-# 3. Scalper on M1 Timeframe with custom pairs
-.\..\smte-env\Scripts\python.exe -u -m core.execution.run_scalper --monitor --interval 30 --execute --timeframe M1 --symbols EURUSD.m GBPUSD.m BTCUSD.m
+# 3. Continuous scan-only monitor (M5, every 60s; scans all strategies; no live orders)
+.\..\smte-env\Scripts\python.exe -u -m core.execution.run_scalper --monitor --interval 60 --dry-run --timeframe M5 --strategy all
 
-# 4. Sync Open Positions & Move Stop Loss to Breakeven (+1.0R)
+# 4. Live execution mode on demo account (with uniform 0.01 micro-lot safety)
+.\..\smte-env\Scripts\python.exe -m core.execution.run_scalper --execute --strategy all --fixed-lots 0.01
+
+# 5. Explicitly sync open positions and manage breakeven (+1.0R)
 .\..\smte-env\Scripts\python.exe -m core.execution.run_scalper --sync-trades
 ```
+
+`--execute` enables broker orders and should not be used for unattended trading
+until the strategy and risk controls have been independently reviewed and
+validated. `--dry-run` takes precedence over `--execute` and skips open-trade
+management, including with `--sync-trades`.
 
 ### B. Standard Pipeline & Order Execution (`run_order_executor.py`)
 
@@ -243,22 +244,24 @@ All commands are executed from the `c:\Users\kinzi\SMTE\backend` directory with 
 
 # 3. Honest one-trade-at-a-time period split report
 .\..\smte-env\Scripts\python.exe -m strategy_backtest.split_report
+# 4. Research strategies historical backtest (Turtle Soup, Unicorn, PO3)
+.\..\smte-env\Scripts\python.exe -m strategy_backtest.research_rules_backtest --symbols EURUSD.m GBPUSD.m XAUUSD.m --timeframe M15
 ```
 
 ---
 
 ## 8. Automated Test Suite
 
-SMTE includes an automated unit test suite covering database models, MT5 connectivity, risk management lot sizing, order execution, breakeven adjustments, and lower-timeframe scalp refinement.
+SMTE includes an automated unit test suite covering database models, MT5 connectivity, risk management lot sizing, order execution, breakeven adjustments, strategy rules (Breaker, Unicorn, Turtle Soup, PO3, Daily Bias, MMXM), and lower-timeframe scalp refinement.
 
-Run all 30 tests:
+Run all 78 tests:
 ```powershell
 cd backend
 .\..\smte-env\Scripts\python.exe -m unittest discover -s tests
 ```
 Output:
 ```text
-Ran 30 tests in 0.53s — OK
+Ran 78 tests — OK
 ```
 
 ---
