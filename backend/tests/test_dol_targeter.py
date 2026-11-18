@@ -37,12 +37,12 @@ class DolTargeterTests(unittest.TestCase):
     def test_identify_and_update_dol_targets(self):
         base_time = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
 
-        # Create two liquidity zones: one equal highs at 1.1100 (BUY_SIDE DOL), one equal lows at 1.0900
+        # Create two liquidity zones: equal highs are BUY_SIDE; equal lows are SELL_SIDE.
         lz_high = LiquidityZone(
             id=101,
             instrument_id=1,
             timeframe="H1",
-            zone_type="SELL_SIDE",  # equal highs
+            zone_type="BUY_SIDE",  # equal highs
             price_level=1.1100,
             formed_at=base_time,
             is_swept=False,
@@ -52,7 +52,7 @@ class DolTargeterTests(unittest.TestCase):
             id=102,
             instrument_id=1,
             timeframe="H1",
-            zone_type="BUY_SIDE",  # equal lows
+            zone_type="SELL_SIDE",  # equal lows
             price_level=1.0900,
             formed_at=base_time,
             is_swept=False,
